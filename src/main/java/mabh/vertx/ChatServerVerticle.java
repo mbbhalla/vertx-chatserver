@@ -17,23 +17,67 @@ package mabh.vertx;
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
 
-import org.vertx.java.core.Handler;
-import org.vertx.java.core.eventbus.Message;
+import java.io.File;
+
+import org.vertx.java.core.http.RouteMatcher;
 import org.vertx.java.platform.Verticle;
 
-/*
-This is a simple Java verticle which receives `ping` messages on the event bus and sends back `pong` replies
- */
-public class ChatServerVerticle extends Verticle {
+public final class ChatServerVerticle extends Verticle {
 
   public void start() {
-    vertx.eventBus().registerHandler("ping-address", new Handler<Message<String>>() {
-      @Override
-      public void handle(Message<String> message) {
-        message.reply("pong!");
-        container.logger().info("Sent back pong");
-      }
-    });
-    container.logger().info("PingVerticle started");
+	container.logger().info("ChatServerVerticle started in thread - " + Thread.currentThread().getId());
+
+	//web server
+	RouteMatcher httpRouteMatcher = new RouteMatcher().get("/", request -> {
+				request.response().sendFile("web/client.html");
+			}).get(".*\\.(css|js)$", request -> {
+					request.response().sendFile("web/" + new File(request.path()));
+			});
+	vertx.createHttpServer().requestHandler(httpRouteMatcher).listen(12080, "localhost");
+	
+	//web socket server
+	vertx.createHttpServer().websocketHandler(sws -> {
+		/*
+		 * handle websocket interactions
+		 */
+		container.logger().info("path: " + sws.path());
+		if(!sws.path().equals("/chat")) {
+			sws.reject();
+			return;
+		}
+		
+		/*
+		 * web socket id. A topic with the name = swsId is created in event bus
+		 * if client1 writes to that topic, message is sent to the clientX attached to that websocket
+		 * maintain a shared set of web socket IDs
+		 */
+		final String swsId = sws.textHandlerID();
+		vertx.sharedData().getSet("chat.room").add(swsId);
+		container.logger().info("socket added to shared data: " + swsId);
+		
+		/*
+		 * on close
+		 */
+		sws.closeHandler(argument -> {
+			vertx.sharedData().getSet("chat.room").remove(swsId);
+			container.logger().info("socket removed from shared data: " + swsId);
+		});
+		
+		/*
+		 * on receiving data
+		 */
+		sws.dataHandler(buffer -> {
+			container.logger().info("data received on the socket:" + swsId);
+			for(Object socketId: vertx.sharedData().getSet("chat.room")) {
+				//dont send to self message
+				if(!swsId.equals(socketId)) {
+					vertx.eventBus().send((String)socketId, buffer.toString());
+					container.logger().info("sending message " + buffer.toString() + " to " + socketId);
+				}
+			}
+		});
+	}).listen(12081, "localhost");
+	
+    container.logger().info("ChatServerVerticle started");
   }
 }
